@@ -25,3 +25,12 @@ staticcheck:
 
 clean:
 	rm -rf bin/*
+
+profile: cpu.pprof
+	./bin/benchmarker
+	go tool pprof -http localhost:8081 cpu.pprof
+
+cpu.pprof:
+	curl -s http://localhost:6060/debug/pprof/profile > cpu.pprof&
+
+.PHONY: profile cpu.pprof
