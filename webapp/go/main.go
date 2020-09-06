@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -323,6 +324,9 @@ func main() {
 		newrelic.ConfigDistributedTracerEnabled(true),
 		newrelic.ConfigDebugLogger(os.Stdout),
 	)
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
 
 	host := os.Getenv("MYSQL_HOST")
 	if host == "" {
