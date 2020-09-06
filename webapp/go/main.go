@@ -586,9 +586,13 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	campaignLevel, ng := strconv.Atoi(os.Getenv("CAMPAIGN"))
+	if ng != nil {
+		campaignLevel = 0
+	}
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
-		Campaign: 0,
+		Campaign: campaignLevel,
 		// 実装言語を返す
 		Language: "Go",
 	}
