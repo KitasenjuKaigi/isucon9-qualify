@@ -68,6 +68,7 @@ var (
 	templates           *template.Template
 	dbx                 *sqlx.DB
 	store               sessions.Store
+	allCategories       []Category
 	categoryCache       *cache.Cache
 	parentCategoryCache *cache.Cache
 )
@@ -293,6 +294,7 @@ func cacheCategories() {
 	if err != nil {
 		panic(errors.WithStack(err))
 	}
+	allCategories = make([]Category, 0)
 	for rows.Next() {
 		var category Category
 		err = rows.StructScan(&category)
@@ -310,6 +312,7 @@ func cacheCategories() {
 			categories = append(categories, category)
 		}
 		parentCategoryCache.Set(string(category.ParentID), categories, cache.NoExpiration)
+		allCategories = append(allCategories, category)
 	}
 }
 
@@ -499,17 +502,12 @@ func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err err
 }
 
 func getCategoriesByIDs(q sqlx.Queryer, categoryIDs []int) (categories map[int]*Category, err error) {
-	cats := []Category{}
-	inQuery, inArgs, err := sqlx.In("SELECT * FROM `categories` WHERE `id` IN (?)", categoryIDs)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-	err = dbx.Select(&cats, inQuery, inArgs...)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
 	categories = make(map[int]*Category, len(categoryIDs))
-	for _, category := range cats {
+	for _, categoryID := range categoryIDs {
+		category, err := getCategoryByID(q, categoryID)
+		if err != nil {
+			return nil, err
+		}
 		if category.ParentID != 0 {
 			parentCategory, err := getCategoryByID(q, category.ParentID)
 			if err != nil {
@@ -2316,15 +2314,7 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 
 	ress.PaymentServiceURL = getPaymentServiceURL(ctx)
 
-	categories := []Category{}
-
-	err := dbx.Select(&categories, "SELECT * FROM `categories`")
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	ress.Categories = categories
+	ress.Categories = allCategories
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(ress)
