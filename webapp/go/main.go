@@ -65,10 +65,12 @@ const (
 )
 
 var (
-	templates *template.Template
-	dbx       *sqlx.DB
-	store     sessions.Store
-	c         *cache.Cache
+	templates           *template.Template
+	dbx                 *sqlx.DB
+	store               sessions.Store
+	allCategories       []Category
+	categoryCache       *cache.Cache
+	parentCategoryCache *cache.Cache
 )
 
 type Config struct {
@@ -286,19 +288,31 @@ func init() {
 
 var app *newrelic.Application
 
-func cacheCategories(c *cache.Cache) {
+func cacheCategories() {
 	// cache item category
 	rows, err := dbx.Queryx("SELECT * FROM `categories`")
 	if err != nil {
 		panic(errors.WithStack(err))
 	}
+	allCategories = make([]Category, 0)
 	for rows.Next() {
 		var category Category
 		err = rows.StructScan(&category)
 		if err != nil {
 			panic(errors.WithStack(err))
 		}
-		c.Set(string(category.ID), category, cache.NoExpiration)
+		categoryCache.Set(string(category.ID), category, cache.NoExpiration)
+		// create cache ParentID to IDs map
+		var categories []Category
+		if x, found := parentCategoryCache.Get(string(category.ParentID)); found {
+			categories = x.([]Category)
+			categories = append(categories, category)
+		} else {
+			categories = make([]Category, 0)
+			categories = append(categories, category)
+		}
+		parentCategoryCache.Set(string(category.ParentID), categories, cache.NoExpiration)
+		allCategories = append(allCategories, category)
 	}
 }
 
@@ -351,8 +365,9 @@ func main() {
 	defer dbx.Close()
 
 	//cacheCategories
-	c = cache.New(5*time.Minute, 10*time.Minute)
-	cacheCategories(c)
+	categoryCache = cache.New(5*time.Minute, 10*time.Minute)
+	parentCategoryCache = cache.New(5*time.Minute, 10*time.Minute)
+	cacheCategories()
 
 	mux := goji.NewMux()
 	mux.Use(nrt)
@@ -470,7 +485,7 @@ func getUsersSimpleByIDs(q sqlx.Queryer, userIDs []int64) (userSimples map[int64
 }
 
 func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err error) {
-	if x, found := c.Get(string(categoryID)); found {
+	if x, found := categoryCache.Get(string(categoryID)); found {
 		category = x.(Category)
 	} else {
 		err = sqlx.Get(q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
@@ -487,17 +502,12 @@ func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err err
 }
 
 func getCategoriesByIDs(q sqlx.Queryer, categoryIDs []int) (categories map[int]*Category, err error) {
-	cats := []Category{}
-	inQuery, inArgs, err := sqlx.In("SELECT * FROM `categories` WHERE `id` IN (?)", categoryIDs)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-	err = dbx.Select(&cats, inQuery, inArgs...)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
 	categories = make(map[int]*Category, len(categoryIDs))
-	for _, category := range cats {
+	for _, categoryID := range categoryIDs {
+		category, err := getCategoryByID(q, categoryID)
+		if err != nil {
+			return nil, err
+		}
 		if category.ParentID != 0 {
 			parentCategory, err := getCategoryByID(q, category.ParentID)
 			if err != nil {
@@ -705,6 +715,25 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(rni)
 }
 
+func getCategoryIDs(rootCategoryID int) ([]int, error) {
+	var categories []Category
+	if x, found := parentCategoryCache.Get(string(rootCategoryID)); found {
+		categories = x.([]Category)
+		length := len(categories)
+		categoryIDs := make([]int, length)
+		for idx, category := range categories {
+			categoryIDs[idx] = category.ID
+		}
+		return categoryIDs, nil
+	}
+	var categoryIDs []int
+	err := dbx.Select(&categoryIDs, "SELECT id FROM `categories` WHERE parent_id=?", rootCategoryID)
+	if err != nil {
+		return nil, err
+	}
+	return categoryIDs, nil
+}
+
 func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 	rootCategoryIDStr := pat.Param(r, "root_category_id")
 	rootCategoryID, err := strconv.Atoi(rootCategoryIDStr)
@@ -719,8 +748,7 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var categoryIDs []int
-	err = dbx.Select(&categoryIDs, "SELECT id FROM `categories` WHERE parent_id=?", rootCategory.ID)
+	categoryIDs, err := getCategoryIDs(rootCategoryID)
 	if err != nil {
 		log.Print(err)
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
@@ -2290,15 +2318,7 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 
 	ress.PaymentServiceURL = getPaymentServiceURL(ctx)
 
-	categories := []Category{}
-
-	err := dbx.Select(&categories, "SELECT * FROM `categories`")
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	ress.Categories = categories
+	ress.Categories = allCategories
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(ress)
